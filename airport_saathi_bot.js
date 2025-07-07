@@ -32,9 +32,15 @@ F) Disruptions & Special Needs: delay/gate-change alerts, lost-&-found help, whe
 
 Respond in simple vernacular or regional language when appropriate, support voice-to-text input, quick replies, images, and videos for clarity.`;
 
+// In-memory user context: { [userId]: [ { role, content, timestamp } ] }
+const userContexts = {};
+
 app.post('/whatsapp', async (req, res) => {
   console.log('Received WhatsApp message:', req.body); // Debug log
   let userMsg = req.body.Body || '';
+  const userId = req.body.From || 'unknown_user';
+  const now = Date.now();
+  const ONE_HOUR = 60 * 60 * 1000;
 
   // If a voice note is sent, transcribe it
   if (parseInt(req.body.NumMedia) > 0 && req.body.MediaContentType0.startsWith('audio/')) {
@@ -61,17 +67,28 @@ app.post('/whatsapp', async (req, res) => {
     }
   }
 
+  // Initialize or update user context
+  if (!userContexts[userId]) userContexts[userId] = [];
+  // Purge messages older than 1 hour
+  userContexts[userId] = userContexts[userId].filter(msg => now - msg.timestamp <= ONE_HOUR);
+  // Add current user message
+  userContexts[userId].push({ role: 'user', content: userMsg, timestamp: now });
+
   try {
-    // Handle both text (Body) and transcribed voice input
+    // Build OpenAI messages: system prompt + recent context
+    const messages = [
+      { role: 'system', content: SYSTEM_PROMPT },
+      ...userContexts[userId].map(({ role, content }) => ({ role, content }))
+    ];
     const data = await openai.chat.completions.create({
       model: 'gpt-4o-mini',
-      messages: [
-        { role: 'system', content: SYSTEM_PROMPT },
-        { role: 'user', content: userMsg }
-      ],
+      messages,
       max_tokens: 500
     });
     const botReply = data.choices[0].message.content;
+
+    // Add assistant reply to context
+    userContexts[userId].push({ role: 'assistant', content: botReply, timestamp: Date.now() });
 
     const twilioResp = new MessagingResponse();
     twilioResp.message(botReply);
