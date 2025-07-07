@@ -7,7 +7,7 @@ const { Configuration, OpenAIApi } = require('openai');
 const { twiml: { MessagingResponse } } = require('twilio');
 
 // Initialize OpenAI
-const openai = new OpenAIApi(new Configuration({ apiKey: process.env.OPENAI_API_KEY }));
+const openai = new OpenAIApi({ apiKey: process.env.OPENAI_API_KEY });
 // Twilio credentials for media fetch
 const accountSid = process.env.TWILIO_ACCOUNT_SID;
 const authToken = process.env.TWILIO_AUTH_TOKEN;
