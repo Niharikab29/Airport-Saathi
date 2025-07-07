@@ -3,11 +3,11 @@ require('dotenv').config();
 const express = require('express');
 const axios = require('axios');
 const FormData = require('form-data');
-const { Configuration, OpenAIApi } = require('openai');
+const { OpenAI } = require('openai');
 const { twiml: { MessagingResponse } } = require('twilio');
 
-// Initialize OpenAI
-const openai = new OpenAIApi({ apiKey: process.env.OPENAI_API_KEY });
+// Initialize OpenAI (v4+)
+const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 // Twilio credentials for media fetch
 const accountSid = process.env.TWILIO_ACCOUNT_SID;
 const authToken = process.env.TWILIO_AUTH_TOKEN;
@@ -63,7 +63,7 @@ app.post('/whatsapp', async (req, res) => {
 
   try {
     // Handle both text (Body) and transcribed voice input
-    const { data } = await openai.createChatCompletion({
+    const data = await openai.chat.completions.create({
       model: 'gpt-4o-mini',
       messages: [
         { role: 'system', content: SYSTEM_PROMPT },
@@ -93,3 +93,4 @@ app.get('/test', (req, res) => {
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`Airport Saathi running on port ${PORT}`));
+
