@@ -89,19 +89,32 @@ app.use((req, res, next) => {
   next();
 });
 
-const SYSTEM_PROMPT = `You are Airport Saathi, a friendly WhatsApp assistant for non-tech-savvy flyers. Guide users through every airport phase:
-
-A) Arrival & Entry: terminal/gate identification, ticket & ID checks, counter location
-B) Check-In & Baggage: queue guidance, allowance rules, kiosk use
-C) Security & Immigration: remove items, illustrated/video guides, voice fallback
-D) In-Terminal Navigation: interactive indoor maps, find restrooms/lounges/ATMs, signboard images
-E) Boarding: gate updates, boarding-group alerts, last-call prompts
-F) Disruptions & Special Needs: delay/gate-change alerts, lost-&-found help, wheelchair requests
-
-Respond in simple vernacular or regional language when appropriate, support voice-to-text input, quick replies, images, and videos for clarity.`;
+// === System prompt with embedded Delhi Airport Data summary ===
+const SYSTEM_PROMPT = `You are Airport Saathi, a friendly WhatsApp assistant for non-tech-savvy flyers at Delhi Airport. Use the following airport data to answer user questions accurately and helpfully. Respond in simple, clear language, and support voice-to-text input, quick replies, images, and videos for clarity when appropriate.\n\nDELHI AIRPORT DATA (for reference):\n${JSON.stringify(delhiAirportData, null, 2)}\n\nGuide users through every airport phase: arrival, check-in, security, navigation, boarding, disruptions, and special needs. Always use the above data for factual queries.`;
 
 // In-memory user context: { [userId]: [ { role, content, timestamp } ] }
 const userContexts = {};
+// In-memory user profiles: { [userId]: { language, favoriteAirline, name, ... } }
+const userProfiles = {};
+// In-memory feedback tracker: { [userId]: { count, awaitingFeedback, feedbackLog: [] } }
+const userFeedback = {};
+
+// Helper to extract preferences from user message (simple version)
+function updateUserProfile(userId, userMsg) {
+  if (!userProfiles[userId]) userProfiles[userId] = {};
+  const msg = userMsg.toLowerCase();
+  // Language preference
+  if (msg.includes('hindi')) userProfiles[userId].language = 'Hindi';
+  if (msg.includes('english')) userProfiles[userId].language = 'English';
+  // Favorite airline
+  if (msg.includes('vistara')) userProfiles[userId].favoriteAirline = 'Vistara';
+  if (msg.includes('air india')) userProfiles[userId].favoriteAirline = 'Air India';
+  if (msg.includes('indigo')) userProfiles[userId].favoriteAirline = 'IndiGo';
+  if (msg.includes('spicejet')) userProfiles[userId].favoriteAirline = 'SpiceJet';
+  // Name (if user says "my name is ...")
+  const nameMatch = userMsg.match(/my name is ([a-zA-Z]+)/i);
+  if (nameMatch) userProfiles[userId].name = nameMatch[1];
+}
 
 // === Query classification and data lookup ===
 function getDelhiAirportAnswer(userMsg) {
@@ -165,6 +178,31 @@ function getDelhiAirportAnswer(userMsg) {
   return null;
 }
 
+// Helper: Check if LLM answer is vague or uncertain
+function isVagueOrUncertain(answer) {
+  if (!answer || answer.trim().length < 10) return true;
+  const vaguePhrases = [
+    'i am not sure',
+    'i\'m not sure',
+    'i do not know',
+    'i don\'t know',
+    'cannot help',
+    'no information',
+    'sorry',
+    'unsure',
+    'uncertain',
+    'not available',
+    'not found',
+    'unknown',
+    'n/a',
+    'no data',
+    'no details',
+    'no info'
+  ];
+  const lower = answer.toLowerCase();
+  return vaguePhrases.some(phrase => lower.includes(phrase));
+}
+
 app.post('/whatsapp', async (req, res) => {
   console.log('Received WhatsApp message:', req.body); // Debug log
   let userMsg = req.body.Body || '';
@@ -207,6 +245,9 @@ app.post('/whatsapp', async (req, res) => {
     }
   }
 
+  // Update user profile with new preferences if mentioned
+  updateUserProfile(userId, userMsg);
+
   // Initialize or update user context
   if (!userContexts[userId]) userContexts[userId] = [];
   // Purge messages older than 1 hour
@@ -214,56 +255,93 @@ app.post('/whatsapp', async (req, res) => {
   // Add current user message
   userContexts[userId].push({ role: 'user', content: userMsg, timestamp: now });
 
-  try {
-    // If this is the user's first message or they ask for help, prompt for location/description
-    const isFirstMsg = userContexts[userId].length === 1;
-    const helpKeywords = [
-      // English
-      'help', 'lost', 'where', 'direction', 'guide', 'exit', 'find', 'reach', 'landed', 'arrived', 'what now', 'what to do', 'baggage', 'luggage', 'restroom', 'toilet', 'taxi', 'cab', 'bus', 'gate', 'terminal', 'confused', 'next', 'pickup', 'drop', 'security', 'immigration',
-      // Hindi (Devanagari)
-      'मदद', 'खो गया', 'कहाँ', 'दिशा', 'मार्गदर्शन', 'निकास', 'हुड़को', 'टलुप', 'इलिद्देने', 'बंदेने', 'अब क्या', 'क्या करें', 'सामान', 'बैग', 'शौचालय', 'टॉयलेट', 'टैक्सी', 'गाड़ी', 'बस', 'गेट', 'टर्मिनल', 'कन्फ्यूज्ड', 'अगला', 'पिकअप', 'ड्रॉप', 'सुरक्षा', 'इमिग्रेशन',
-      // Hindi (transliteration)
-      'madad', 'kho gaya', 'kahan', 'disha', 'margdarshan', 'nikas', 'huduko', 'talupu', 'ilididdhene', 'bandiddhene', 'ab kya', 'kya karen', 'samaan', 'bag', 'shauchalay', 'toilet', 'taxi', 'gaadi', 'bus', 'gate', 'terminal', 'confused', 'agla', 'pickup', 'drop', 'suraksha', 'immigration',
-      // Kannada (Kannada script)
-      'ಸಹಾಯ', 'ಕಳೆದುಹೋದೆ', 'ಎಲ್ಲಿದೆ', 'ದಿಕ್ಕು', 'ಮಾರ್ಗದರ್ಶನ', 'ನಿರ್ಗಮನೆ', 'ಹುಡುಕು', 'ತಲುಪು', 'ಇಳಿದಿದ್ದೇನೆ', 'ಬಂದಿದ್ದೇನೆ', 'ಈಗ ಏನು', 'ಏನು ಮಾಡಲಿ', 'ಸಾಮಾನು', 'ಬ್ಯಾಗ್', 'ಶೌಚಾಲಯ', 'ಟಾಯ್ಲೆಟ್', 'ಟ್ಯಾಕ್ಸಿ', 'ಕಾರು', 'ಬಸ್', 'ಗೇಟ್', 'ಟರ್ಮಿನಲ್', 'ಗೊಂದಲ', 'ಮುಂದಿನದು', 'ಪಿಕಪ್', 'ಡ್ರಾಪ್', 'ಭದ್ರತೆ', 'ಇಮಿಗ್ರೇಶನ್',
-      // Kannada (transliteration)
-      'sahaya', 'kaledu hode', 'ellide', 'dikku', 'margadarshana', 'nirgamane', 'huduku', 'talupu', 'ilididdhene', 'bandiddhene', 'iga enu', 'enu maadali', 'saamaanu', 'bag', 'shouchalaya', 'toilet', 'taxi', 'kaaru', 'bus', 'gate', 'terminal', 'gondala', 'mundinadu', 'pickup', 'drop', 'bhadrate', 'immigration',
-      // Punjabi (Gurmukhi)
-      'ਮਦਦ', 'ਖੋ ਗਿਆ', 'ਕਿੱਥੇ', 'ਦਿਸ਼ਾ', 'ਮਾਰਗਦਰਸ਼ਨ', 'ਨਿਕਾਸ', 'ਲੱਭੋ', 'ਪਹੁੰਚੋ', 'ਉਤਰੇ', 'ਆਇਆ', 'ਹੁਣ ਕੀ', 'ਕੀ ਕਰੀਏ', 'ਸਮਾਨ', 'ਬੈਗ', 'ਬਾਥਰੂਮ', 'ਟਾਇਲਟ', 'ਟੈਕਸੀ', 'ਗੱਡੀ', 'ਬੱਸ', 'ਗੇਟ', 'ਟਰਮੀਨਲ', 'ਉਲਝਣ', 'ਅਗਲਾ', 'ਪਿਕਅੱਪ', 'ਡਰਾਪ', 'ਸੁਰੱਖਿਆ', 'ਇਮੀਗ੍ਰੇਸ਼ਨ',
-      // Punjabi (transliteration)
-      'madad', 'kho giya', 'kithe', 'disha', 'margdarshan', 'nikas', 'labho', 'pahucho', 'utre', 'aaya', 'hun ki', 'ki kariye', 'samaan', 'bag', 'bathroom', 'toilet', 'taxi', 'gaddi', 'bus', 'gate', 'terminal', 'uljhan', 'agla', 'pickup', 'drop', 'surakhia', 'immigration'
-    ];
-    const lowerMsg = userMsg.toLowerCase();
-    const needsPrompt = isFirstMsg || helpKeywords.some(k => lowerMsg.includes(k));
+  // Feedback loop logic
+  if (!userFeedback[userId]) userFeedback[userId] = { count: 0, awaitingFeedback: false, feedbackLog: [] };
+  const feedbackState = userFeedback[userId];
 
-    let botReply;
-    if (needsPrompt && !userLocation) {
-      botReply = `To guide you best at Delhi Airport, please either:\n1. Describe where you are (e.g., 'I'm at Gate 12, Terminal 3'), or\n2. Share your current location using WhatsApp's location feature.\nThis will help Airport Saathi give you the most accurate directions!`;
-    } else {
-      // === Use structured data for Delhi Airport queries ===
-      const dataAnswer = getDelhiAirportAnswer(userMsg);
-      if (dataAnswer) {
-        botReply = dataAnswer;
-      } else {
-        // Build OpenAI messages: system prompt + recent context
-        const messages = [
-          { role: 'system', content: SYSTEM_PROMPT },
-          ...userContexts[userId].map(({ role, content }) => ({ role, content }))
-        ];
-        const data = await openai.chat.completions.create({
-          model: 'gpt-4o-mini',
-          messages,
-          max_tokens: 500
-        });
-        botReply = data.choices[0].message.content;
+  // If awaiting feedback, log it and reset
+  if (feedbackState.awaitingFeedback) {
+    const feedback = userMsg.trim().toLowerCase();
+    if (feedback === 'yes' || feedback === 'no') {
+      feedbackState.feedbackLog.push({ feedback, timestamp: now });
+      feedbackState.awaitingFeedback = false;
+      feedbackState.count = 0; // reset count after feedback
+      // Thank the user for feedback
+      const twilioResp = new MessagingResponse();
+      twilioResp.message('Thank you for your feedback!');
+      res.writeHead(200, { 'Content-Type': 'text/xml' });
+      res.end(twilioResp.toString());
+      return;
+    }
+    // If not yes/no, continue as normal
+  }
+
+  try {
+    // Build personalized system prompt
+    let personalizedPrompt = SYSTEM_PROMPT;
+    const profile = userProfiles[userId];
+    if (profile) {
+      let profileSummary = '';
+      if (profile.name) profileSummary += `\nUser name: ${profile.name}`;
+      if (profile.language) profileSummary += `\nPreferred language: ${profile.language}`;
+      if (profile.favoriteAirline) profileSummary += `\nFavorite airline: ${profile.favoriteAirline}`;
+      if (profileSummary) {
+        personalizedPrompt += `\n\nUSER PROFILE:${profileSummary}`;
+        personalizedPrompt += '\nPersonalize your response accordingly.';
       }
+    }
+    const messages = [
+      { role: 'system', content: personalizedPrompt },
+      ...userContexts[userId].map(({ role, content }) => ({ role, content }))
+    ];
+    const data = await openai.chat.completions.create({
+      model: 'gpt-4o-mini',
+      messages,
+      max_tokens: 500
+    });
+    let botReply = data.choices[0].message.content;
+
+    // Error handling/fallback: If answer is vague or uncertain, send fallback
+    if (isVagueOrUncertain(botReply)) {
+      botReply = "I'm not sure about that, but you can contact the airport help desk at +91-99580-98651 for assistance.";
     }
 
     // Add assistant reply to context
     userContexts[userId].push({ role: 'assistant', content: botReply, timestamp: Date.now() });
 
+    // After sending the main reply, increment feedback count
+    feedbackState.count++;
+    // After every 3 user interactions, ask for feedback
+    let askedForFeedback = false;
+    if (feedbackState.count >= 3 && !feedbackState.awaitingFeedback) {
+      const twilioResp = new MessagingResponse();
+      twilioResp.message('Was this answer helpful? Reply YES or NO.');
+      feedbackState.awaitingFeedback = true;
+      res.writeHead(200, { 'Content-Type': 'text/xml' });
+      res.end(twilioResp.toString());
+      askedForFeedback = true;
+    }
+    if (askedForFeedback) return;
+
     const twilioResp = new MessagingResponse();
-    twilioResp.message(botReply);
+
+    // Multimodal: Send airport map image if LLM requests it
+    if (botReply.includes('[SEND_AIRPORT_MAP]')) {
+      botReply = botReply.replace('[SEND_AIRPORT_MAP]', '').trim();
+      const msg = twilioResp.message(botReply);
+      // Example map image (replace with actual image if available)
+      msg.media('https://www.airportmaps.com/images/delhi-airport-map.jpg');
+    } else if (botReply.match(/\[QUICK_REPLIES:([^\]]+)\]/)) {
+      // Multimodal: Send quick replies if LLM requests it
+      const match = botReply.match(/\[QUICK_REPLIES:([^\]]+)\]/);
+      const options = match[1].split('|').map(opt => opt.trim());
+      botReply = botReply.replace(match[0], '').trim();
+      const msg = twilioResp.message(botReply + '\n\nQuick replies: ' + options.join(' | '));
+      // Note: WhatsApp via Twilio does not support true quick reply buttons, so we show as text
+    } else {
+      twilioResp.message(botReply);
+    }
+
     res.writeHead(200, { 'Content-Type': 'text/xml' });
     res.end(twilioResp.toString());
 
